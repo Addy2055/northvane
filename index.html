@@ -6,9 +6,9 @@
   <title>Northvane | Autonomous Jet Aircraft for Wide-Area Watch</title>
   <meta name="description" content="Northvane builds jet-powered autonomous aircraft and the Meridian AI command layer for wide-area surveillance and emergency response." />
   <link rel="icon" href="assets/mark.svg" type="image/svg+xml" />
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="preload" href="fonts/geist-latin.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="preload" href="fonts/geist-mono-latin.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="stylesheet" href="css/fonts.css" />
   <link rel="stylesheet" href="css/style.css" />
   <link rel="modulepreload" href="js/main.js" />
   <link rel="modulepreload" href="js/world.js" />
@@ -17,14 +17,14 @@
   <link rel="modulepreload" href="js/vendor/lenis.mjs" />
   <link rel="preload" href="assets/terrain/height.bin" as="fetch" crossorigin />
   <link rel="preload" href="assets/terrain/meta.json" as="fetch" crossorigin />
-  <link rel="preload" href="assets/terrain/albedo.jpg" as="image" />
-  <link rel="preload" href="assets/terrain/light.jpg" as="image" />
+  <link rel="preload" href="assets/terrain/albedo.jpg" as="fetch" crossorigin />
+  <link rel="preload" href="assets/terrain/light.jpg" as="fetch" crossorigin />
 </head>
 <body class="is-booting">
 
   <!-- Boot splash -->
   <div id="boot" aria-hidden="true">
-    <canvas id="boot-canvas"></canvas>
+    <svg class="boot-mark" viewBox="0 0 64 64" aria-hidden="true"><g fill="none" stroke="#fff" stroke-width="4"><path d="M12 46a20 20 0 0 1 40 0"/><path d="M20 46l12-9 12 9"/><path d="M20 38l12-9 12 9"/></g></svg>
     <div class="boot-status">
       <div class="boot-bar"><i></i></div>
       <div class="boot-label mono">Loading assets</div>
@@ -52,7 +52,7 @@
   </div>
 
   <main id="main">
-    <div id="scroll-spacer"></div>
+    <div id="scroll-spacer" style="height:6700vh"></div>
 
     <section id="cases" class="cases">
       <h2 class="h3 cases-title">One platform, many missions.</h2>

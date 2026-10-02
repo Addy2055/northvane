@@ -9,4 +9,4 @@ This repository bundles the following libraries unmodified in `js/vendor/`. Both
 
 Full license texts: https://github.com/mrdoob/three.js/blob/dev/LICENSE and https://github.com/darkroomengineering/lenis/blob/main/LICENSE
 
-Fonts (loaded at runtime from Google Fonts, not bundled): Geist and Geist Mono by Vercel, SIL Open Font License 1.1.
+Fonts (bundled in `fonts/`, latin subset): Geist and Geist Mono by Vercel, SIL Open Font License 1.1. See `fonts/OFL.txt`.

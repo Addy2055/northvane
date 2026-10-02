@@ -27,6 +27,7 @@ Debug URL parameters:
 | Param | Effect |
 |---|---|
 | `?stop=N` | Skip the loader and jump to scene rest point `N` (0–14) |
+| `?perf` | Show boot stage times and the WebGL program count |
 | `?t=VH` | Jump to an exact scroll position, in viewport-heights |
 | `?view=auto&p=0.5` | Render one tail view (`globe`, `auto`, `land`) full screen at progress `p` |
 | `?bake=wildfire\|border\|grid` | Render a use-case card image from the 3D scene |
@@ -61,9 +62,11 @@ At runtime the terrain is loaded at half scale and mirror-tiled 5×5, with low-r
 
 **Performance.**
 - Programs are precompiled with `renderer.compileAsync`.
+- The landing view keeps the close-up's directional-light count, with the extra light at zero intensity, so those materials share programs.
 - Tail views are built lazily.
 - Render resolution adapts between 0.75× and 1.5× DPR based on measured frame time.
 - The terrain's detail is pre-baked, so the fragment shader stays cheap.
+- The normal map is built from the heightfield on a worker, and on the main thread if that worker does not finish.
 
 ## Project layout
 
@@ -72,7 +75,8 @@ index.html            shell, preloads
 css/style.css         design tokens, type scale, layout, responsive rules
 js/content.js         every string on the page (rebrand here)
 js/main.js            loader, scroll stepping, scene reveals, pinned labels, menu, contact modal, audio
-js/world.js           terrain + map worlds, keyframes, wipe compositor, tail views, loader drone
+js/world.js           terrain + map worlds, keyframes, wipe compositor, tail views
+js/normals.js         heightfield to normal map, on a worker during boot
 js/vendor/            three.js r169, Lenis 1.1.20
 assets/terrain/       baked terrain (height.bin, albedo.jpg, light.jpg, meta.json)
 assets/case-*.jpg     use-case images rendered from the scene (?bake=)
@@ -83,7 +87,7 @@ tools/gen_terrain.py  offline terrain generator
 
 This is a design-engineering study. The page structure, scroll pacing and interaction model are modelled on [usavionix.com](https://www.usavionix.com/), a site worth visiting. Northvane, its copy, and every 3D asset and image in this repo are original. This project is not affiliated with USAvionix. The founders' logos are fictional wordmarks, and the contact form is a demo that sends nothing.
 
-Type is [Geist and Geist Mono](https://vercel.com/font) (SIL OFL), loaded from Google Fonts. Bundled libraries: see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Type is [Geist and Geist Mono](https://vercel.com/font) (SIL OFL), bundled in `fonts/` (Latin subset). Bundled libraries: see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## License
 

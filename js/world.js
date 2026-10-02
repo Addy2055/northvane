@@ -2,6 +2,7 @@
 // World A = photographic-ish terrain flight, World B = tactical map, plus tail "views"
 // (globe / close-up / landing) rendered into DOM rects with scissor. No external models.
 import * as THREE from './vendor/three.module.min.js';
+import { bakeNormals } from './normals.js';
 
 /* ------------------------------------------------------------------ noise */
 function mulberry(seed) { return () => { seed |= 0; seed = (seed + 0x6D2B79F5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
@@ -79,25 +80,65 @@ float snoise(vec2 v){
 float fbm4(vec2 p){ float a=.5,s=0.; for(int i=0;i<4;i++){ s+=a*snoise(p); p=p*2.03+vec2(17.1,3.7); a*=.5; } return s; }
 `;
 
-function normalTexture() {
-  const N = HN, cell = TERRAIN_SIZE / N, d = new Uint8Array(N * N * 4);
-  for (let z = 0; z < N; z++) for (let x = 0; x < N; x++) {
-    const l = HM[z * N + Math.max(0, x - 1)], r = HM[z * N + Math.min(N - 1, x + 1)];
-    const u = HM[Math.max(0, z - 1) * N + x], dn = HM[Math.min(N - 1, z + 1) * N + x];
-    let nx = -(r - l) / (2 * cell), nz = -(dn - u) / (2 * cell), ny = 1; const L = Math.hypot(nx, ny, nz);
-    const i = (z * N + x) * 4; d[i] = ((nx / L) * 0.5 + 0.5) * 255; d[i + 1] = ((ny / L) * 0.5 + 0.5) * 255; d[i + 2] = ((nz / L) * 0.5 + 0.5) * 255; d[i + 3] = 255;
-  }
-  const t = new THREE.DataTexture(d, N, N, THREE.RGBAFormat); t.magFilter = THREE.LinearFilter; t.minFilter = THREE.LinearMipmapLinearFilter; t.generateMipmaps = true; t.anisotropy = 8; t.needsUpdate = true;
+function textureFromNormals(d) {
+  const t = new THREE.DataTexture(d, HN, HN, THREE.RGBAFormat);
+  t.magFilter = THREE.LinearFilter;
+  t.minFilter = THREE.LinearMipmapLinearFilter;
+  t.generateMipmaps = true;
+  t.anisotropy = 8;
+  t.needsUpdate = true;
   return t;
 }
+function bakeNormalsOffThread(hm, N, cell) {
+  return new Promise((resolve, reject) => {
+    let worker;
+    try {
+      worker = new Worker(new URL('./normal.worker.js', import.meta.url), { type: 'module' });
+    } catch (err) {
+      reject(err);
+      return;
+    }
+    const timer = setTimeout(() => { worker.terminate(); reject(new Error('normals timed out')); }, 4000);
+    worker.onmessage = (e) => { clearTimeout(timer); worker.terminate(); resolve(e.data); };
+    worker.onerror = () => { clearTimeout(timer); worker.terminate(); reject(new Error('normals worker failed')); };
+    const copy = new Float32Array(hm);
+    worker.postMessage({ hm: copy, N, cell }, [copy.buffer]);
+  });
+}
+async function normalTexture() {
+  const N = HN;
+  const cell = TERRAIN_SIZE / N;
+  let d;
+  try {
+    d = await bakeNormalsOffThread(HM, N, cell);
+    if (!(d instanceof Uint8Array) || d.length !== N * N * 4) throw new Error('normals short');
+  } catch {
+    d = bakeNormals(HM, N, cell);
+  }
+  return textureFromNormals(d);
+}
 
+async function loadTerrainMap(url, srgb) {
+  // createImageBitmap decodes off the main thread. imageOrientation none matches the old flipY:false upload.
+  const loader = new THREE.ImageBitmapLoader();
+  loader.setOptions({ imageOrientation: 'none', premultiplyAlpha: 'none' });
+  const bitmap = await loader.loadAsync(url);
+  const tex = new THREE.Texture(bitmap);
+  tex.flipY = false;
+  tex.generateMipmaps = true;
+  tex.needsUpdate = true;
+  if (srgb) tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
 async function makeTerrain(renderer) {
-  const loader = new THREE.TextureLoader();
-  const [alb, light] = await Promise.all(['assets/terrain/albedo.jpg', 'assets/terrain/light.jpg'].map((u) => loader.loadAsync(u)));
+  const [alb, light] = await Promise.all([
+    loadTerrainMap('assets/terrain/albedo.jpg', true),
+    loadTerrainMap('assets/terrain/light.jpg', false),
+  ]);
   const aniso = renderer.capabilities.getMaxAnisotropy();
-  alb.colorSpace = THREE.SRGBColorSpace; alb.flipY = false; alb.anisotropy = aniso; alb.needsUpdate = true;
-  light.flipY = false; light.needsUpdate = true;
-  const nrm = normalTexture(); nrm.anisotropy = aniso;
+  alb.anisotropy = aniso;
+  light.anisotropy = aniso;
+  const nrm = await normalTexture(); nrm.anisotropy = aniso;
   const geo = new THREE.PlaneGeometry(TERRAIN_SIZE, TERRAIN_SIZE, TERRAIN_SEG, TERRAIN_SEG);
   geo.rotateX(-Math.PI / 2);
   const pos = geo.attributes.position;
@@ -263,6 +304,15 @@ function wingGeometry() {
   wingGeoCache = g; return g;
 }
 
+async function readyDecalFonts() {
+  if (!document.fonts?.load) return;
+  const loaded = Promise.all([
+    document.fonts.load('600 64px Geist'),
+    document.fonts.load('500 16px "Geist Mono"'),
+  ]).catch(() => {});
+  await Promise.race([loaded, new Promise((resolve) => setTimeout(resolve, 1500))]);
+}
+
 function droneDecal() {
   const W = 1024, Hh = 768; // x: -7..7, z: -5.3..2.5 -> canvas
   const c = document.createElement('canvas'); c.width = W; c.height = Hh;
@@ -304,23 +354,30 @@ function droneDecal() {
 }
 
 let decalTex = null;
-function makeDrone({ env, legs = false, lod = 'high', color = 0x2b2d30 } = {}) {
+let flockWing = null;
+let flockNacelle = null;
+function flockGeometry() {
+  if (flockWing) return { wing: flockWing, nacelle: flockNacelle };
+  const { shape } = planShape();
+  flockWing = new THREE.ExtrudeGeometry(shape, { depth: 0.12, bevelEnabled: false, curveSegments: 4 });
+  flockWing.rotateX(Math.PI / 2);
+  flockWing.translate(0, 0.06, 0);
+  flockNacelle = new THREE.CylinderGeometry(0.55, 0.55, 5.4, 8);
+  return { wing: flockWing, nacelle: flockNacelle };
+}
+function makeDrone({ env, legs = false, lod = 'high', color = 0x2b2d30, material = null } = {}) {
   const root = new THREE.Group();
   const body = new THREE.Group(); root.add(body);
-  const { shape } = planShape();
-  const depth = lod === 'low' ? 0.12 : 0.06;
-  const geo = new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: lod !== 'low', bevelThickness: 0.09, bevelSize: 0.14, bevelSegments: 3, curveSegments: 4 });
-  geo.rotateX(Math.PI / 2); geo.translate(0, depth / 2, 0);
   if (lod === 'low') {
-    const m = new THREE.MeshLambertMaterial({ color });
-    body.add(new THREE.Mesh(geo, m));
-    const nac = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.55, 5.4, 8), m); nac.rotation.x = Math.PI / 2; nac.position.set(0, 0.4, 0.2); body.add(nac);
+    const { wing, nacelle } = flockGeometry();
+    const m = material || new THREE.MeshLambertMaterial({ color });
+    body.add(new THREE.Mesh(wing, m));
+    const nac = new THREE.Mesh(nacelle, m); nac.rotation.x = Math.PI / 2; nac.position.set(0, 0.4, 0.2); body.add(nac);
     root.userData.materials = [m];
     return root;
   }
   if (!decalTex) decalTex = droneDecal();
   const capMat = new THREE.MeshStandardMaterial({ map: decalTex, metalness: 0.55, roughness: 0.42, envMap: env, envMapIntensity: 1.2 });
-  const sideMat = new THREE.MeshStandardMaterial({ color, metalness: 0.6, roughness: 0.4, envMap: env, envMapIntensity: 1.2 });
   const wing = new THREE.Mesh(wingGeometry(), capMat); body.add(wing);
   // engine nacelle (lathe along z)
   const prof = [[0.0, -3.0], [0.42, -3.0], [0.62, -2.6], [0.72, -1.8], [0.74, 1.4], [0.66, 2.6], [0.52, 3.2], [0.44, 3.25]].map(([r, y]) => new THREE.Vector2(r, y));
@@ -366,7 +423,7 @@ function makeDrone({ env, legs = false, lod = 'high', color = 0x2b2d30 } = {}) {
     center: new THREE.Vector3(0, 0.6, -0.4),
   };
   root.userData.anchors = anchors;
-  root.userData.materials = [capMat, sideMat, nacMat];
+  root.userData.materials = [capMat, nacMat];
   return root;
 }
 
@@ -630,7 +687,7 @@ function delaunayEdges(P) {
 }
 
 /* ----------------------------------------------------------------- world */
-export async function createWorld(canvas, { onProgress = () => {}, dprMax = 1.5 } = {}) {
+export async function createWorld(canvas, { onProgress = () => {}, dprMax = 1.5, perf = false } = {}) {
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance', alpha: false });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, dprMax));
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -638,8 +695,17 @@ export async function createWorld(canvas, { onProgress = () => {}, dprMax = 1.5 
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.setClearColor(0x000000, 1);
   const tick = () => new Promise((r) => setTimeout(r, 0));
+  const stages = [];
+  let stageAt = performance.now();
+  const stage = (name) => {
+    if (!perf) return;
+    const now = performance.now();
+    stages.push({ name, ms: Math.round(now - stageAt) });
+    stageAt = now;
+  };
 
   const env = makeEnv(renderer);
+  stage('env');
   onProgress(0.15); await tick();
 
   /* ---------- World A ---------- */
@@ -649,10 +715,12 @@ export async function createWorld(canvas, { onProgress = () => {}, dprMax = 1.5 
   const terrain = await makeTerrain(renderer); sceneA.add(terrain.mesh);
   terrain.uniforms.uHot.value.set(HOT.x, H(HOT.x, HOT.z), HOT.z);
   sceneA.background = terrain.uniforms.uFogCol.value;
+  stage('terrain');
   onProgress(0.55); await tick();
   const hemiA = new THREE.HemisphereLight(0xcfd8e0, 0x2a2a20, 0.9); sceneA.add(hemiA);
   const sun = new THREE.DirectionalLight(0xfff2e0, 3.2); sun.position.copy(terrain.uniforms.uSunDir.value).multiplyScalar(100); sceneA.add(sun);
 
+  await readyDecalFonts();
   const drones = [makeDrone({ env }), makeDrone({ env }), makeDrone({ env })];
   drones.forEach((d) => sceneA.add(d));
 
@@ -742,6 +810,7 @@ export async function createWorld(canvas, { onProgress = () => {}, dprMax = 1.5 
   const ground = new THREE.Mesh(groundGeo, gridMat); sceneB.add(ground);
   sceneB.add(new THREE.HemisphereLight(0xffffff, 0x222222, 1.4));
   const dl = new THREE.DirectionalLight(0xffffff, 1.6); dl.position.set(-1, 2, 1); sceneB.add(dl);
+  stage('flight');
   onProgress(0.7); await tick();
 
   const regions = {
@@ -798,9 +867,10 @@ export async function createWorld(canvas, { onProgress = () => {}, dprMax = 1.5 
 
   // flock (sync scene)
   const flockN = 38; const flock = [];
+  const flockMat = new THREE.MeshLambertMaterial({ color: 0xe6e8ea });
   { const rnd = mulberry(123);
     for (let i = 0; i < flockN; i++) {
-      const d = makeDrone({ lod: 'low', color: 0xe6e8ea }); d.scale.setScalar(0.8);
+      const d = makeDrone({ lod: 'low', material: flockMat }); d.scale.setScalar(0.8);
       const x = FLOCK.x + (rnd() - 0.5) * 700, z = FLOCK.z - 30 + (rnd() - 0.5) * 430;
       d.userData.base = new THREE.Vector3(x, 0, z); d.userData.ph = rnd() * 100; d.userData.sp = 0.5 + rnd() * 0.6;
       d.position.set(x, G(x, z) + 14, z); sceneB.add(d); flock.push(d);
@@ -839,10 +909,17 @@ export async function createWorld(canvas, { onProgress = () => {}, dprMax = 1.5 
   }));
   const compScene = new THREE.Scene(); compScene.add(comp);
   const compCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  stage('map');
 
   /* ---------- Tail views ---------- */
   let views = null;
-  const getViews = () => views || (views = makeViews(env));
+  const getViews = () => {
+    if (views) return views;
+    views = makeViews(env);
+    // Tail views draw to the canvas, so the default (no target) variants are the ones used.
+    try { views.compile(renderer); } catch (_) { /* compile on first draw */ }
+    return views;
+  };
 
   onProgress(0.9); await tick();
 
@@ -1113,10 +1190,26 @@ export async function createWorld(canvas, { onProgress = () => {}, dprMax = 1.5 
   }
 
   function setPixelRatio(pr) { renderer.setPixelRatio(pr); resize(state.w, state.h); }
-  // compile programs in parallel (KHR_parallel_shader_compile) so the first frame doesn't stall
-  try { await Promise.all([renderer.compileAsync(sceneA, camA), renderer.compileAsync(sceneB, camB), renderer.compileAsync(compScene, compCam)]); } catch (_) { /* older drivers: compile on first draw */ }
+  // Upload the big maps before the first draw so that frame is not also a texture stall.
+  for (const tex of [terrain.uniforms.tAlb.value, terrain.uniforms.tLight.value, terrain.uniforms.tNrm.value, decalTex, cloudTex]) {
+    if (tex) renderer.initTexture(tex);
+  }
+  // Program cache key includes the bound target. Scene A/B are only ever drawn into half-float
+  // targets (no tone mapping, linear output). Compiling with the screen target builds variants
+  // the first frame cannot reuse.
+  try {
+    renderer.setRenderTarget(rtA);
+    const compileA = renderer.compileAsync(sceneA, camA);
+    renderer.setRenderTarget(rtB);
+    const compileB = renderer.compileAsync(sceneB, camB);
+    renderer.setRenderTarget(null);
+    const compileC = renderer.compileAsync(compScene, compCam);
+    await Promise.all([compileA, compileB, compileC]);
+  } catch (_) { /* older drivers: compile on first draw */ }
+  renderer.setRenderTarget(null);
+  stage('compile');
   onProgress(1);
-  return { renderer, update, render, resize, state, project, bake, keysA, getViews, setPixelRatio };
+  return { renderer, update, render, resize, state, project, bake, keysA, getViews, setPixelRatio, perf: perf ? { stages, programs: () => renderer.info.programs.length } : null };
 }
 
 /* ------------------------------------------------------------ tail views */
@@ -1222,6 +1315,7 @@ function makeViews(env) {
     shadow.position.y = -3.18; shadow.scale.set(1.4, 1, 1); scene.add(shadow);
     const aim = new THREE.Vector3(), right = new THREE.Vector3();
     views.auto = {
+      scene, cam,
       render(renderer, rect, p, T, ptr) {
         cam.aspect = rect.width / rect.height;
         const narrow = cam.aspect < 1;
@@ -1249,11 +1343,14 @@ function makeViews(env) {
     scene.add(new THREE.HemisphereLight(0xb8c0cc, 0x0a0a0a, 0.7));
     const key = new THREE.DirectionalLight(0xffffff, 2.6); key.position.set(-4, 10, 8); scene.add(key);
     const rim = new THREE.DirectionalLight(0xa9c1ff, 1.6); rim.position.set(5, 3, -8); scene.add(rim);
+    // Same directional-light count as the close-up, so the aircraft programs are reused. Intensity 0 adds no light.
+    scene.add(new THREE.DirectionalLight(0x000000, 0));
     const shadow = new THREE.Mesh(new THREE.CircleGeometry(7, 48), new THREE.MeshBasicMaterial({ map: glowTexture('rgba(0,0,0,.9)', 'rgba(0,0,0,0)'), transparent: true, depthWrite: false }));
     shadow.rotation.x = -Math.PI / 2; scene.add(shadow);
     const floorMat = gridMaterial(); floorMat.uniforms.uRad.value = 70;
     const floor = new THREE.Mesh(new THREE.PlaneGeometry(300, 300), floorMat); floor.rotation.x = 0; floor.position.y = -0.02; floor.geometry.rotateX(-Math.PI / 2); floor.scale.setScalar(0.18); scene.add(floor);
     views.land = {
+      scene, cam,
       render(renderer, rect, p, T) {
         cam.aspect = rect.width / rect.height; cam.updateProjectionMatrix();
         // p: 0 = drone high above (over founders), 1 = landed in footer
@@ -1268,33 +1365,13 @@ function makeViews(env) {
       },
     };
   }
-  return views;
-}
-
-/* ------------------------------------------------------------ boot drone */
-export function createBoot(canvas) {
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
-  renderer.outputColorSpace = THREE.SRGBColorSpace;
-  const scene = new THREE.Scene();
-  const cam = new THREE.PerspectiveCamera(30, 1, 0.1, 100);
-  const d = makeDrone({ lod: 'high' });
-  d.traverse((o) => { if (o.isMesh) o.material = new THREE.MeshLambertMaterial({ color: 0x2d302e, transparent: true, opacity: 0.8 }); if (o.isSprite) o.visible = false; });
-  scene.add(d);
-  scene.add(new THREE.AmbientLight(0xffffff, 0.35));
-  const l = new THREE.DirectionalLight(0xd8d4c0, 1.2); l.position.set(-3, 6, 2); scene.add(l);
-  d.rotation.set(0.35, 0.95, -0.3, 'YXZ');
-  cam.position.set(-8, 22, 18); cam.lookAt(0.8, -0.8, -0.6);
-  let raf = 0, alive = true;
-  const loop = (t) => {
-    if (!alive) return;
-    const w = canvas.clientWidth, h = canvas.clientHeight;
-    if (canvas.width !== Math.floor(w * renderer.getPixelRatio())) renderer.setSize(w, h, false);
-    cam.aspect = w / h; cam.fov = w < 768 ? 48 : 30; cam.updateProjectionMatrix();
-    d.position.y = Math.sin(t * 0.0008) * 0.15;
-    renderer.render(scene, cam);
-    raf = requestAnimationFrame(loop);
+  views.compile = (gl) => {
+    const prev = gl.getRenderTarget();
+    gl.setRenderTarget(null);
+    gl.compile(views.globe.scene, views.globe.cam);
+    gl.compile(views.auto.scene, views.auto.cam);
+    gl.compile(views.land.scene, views.land.cam);
+    gl.setRenderTarget(prev);
   };
-  raf = requestAnimationFrame(loop);
-  return { dispose() { alive = false; cancelAnimationFrame(raf); renderer.dispose(); renderer.forceContextLoss?.(); } };
+  return views;
 }
